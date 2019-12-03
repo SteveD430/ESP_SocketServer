@@ -1,0 +1,1 @@
+cmd='/Applications/CMake.app/Contents/bin/cmake;-DSDKCONFIG=/Users/stephendickinson/esp/function_generator/sdkconfig;-DIDF_PATH=/Users/stephendickinson/esp/esp-idf;-DIDF_TARGET=esp32;-DPYTHON_DEPS_CHECKED=1;-DEXTRA_COMPONENT_DIRS=/Users/stephendickinson/esp/esp-idf/components/bootloader;-DLEGACY_INCLUDE_COMMON_HEADERS=;-GNinja;<SOURCE_DIR><SOURCE_SUBDIR>'
