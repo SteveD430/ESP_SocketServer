@@ -1,4 +1,4 @@
-/* Function Generator Simulation
+/* Function Generator
  
 */
 #include <stdio.h>
@@ -6,6 +6,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "freertos/queue.h"
+#include "driver/gpio.h"
 #include "esp_system.h"
 #include "esp_spi_flash.h"
 #include "nvs_flash.h"
@@ -30,8 +32,21 @@
 
 #define CORE0 0
 #define CORE1 1
-#define BUFFER_SIZE 1000 // Size of double buffer for data compilation. This value will need to be calibrated.
+#define BUFFER_SIZE 2000 // Size of double buffer for data compilation. This value will need to be calibrated.
 #define ASCII_BUFFER_SIZE BUFFER_SIZE*5 // Buffer for Ascii85 data tx.
+
+/*
+  This set-up caters for two generators (GPIO 18 & 19) and two Reveivers (GPIO 4 & 5)
+  However we are ony using GPIO 18 & GPIO 4.
+ */
+#define GPIO_OUTPUT_IO_0 18
+#define GPIO_OUTPUT_IO_1 19
+#define GPIO_OUTPUT_PIN_SEL ((1ULL<<GPIO_OUTPUT_IO_0) | (1ULL<<GPIO_OUTPUT_IO_1))
+#define GPIO_INPUT_IO_0 4
+#define GPIO_INPUT_IO_1 5
+#define GPIO_INPUT_PIN_SEL ((1ULL<<GPIO_INPUT_IO_0) | (1ULL<<GPIO_INPUT_IO_1))
+#define ESP_INTR_FLAG_DEFAULT 0
+
 
 static const char* TAG = "wifi function_generator";
 
@@ -42,21 +57,25 @@ static int telnet_socket;
 static bool wifiConnected = false;
 static bool telnetClientConnected = false;
 
-static TaskHandle_t taskDataGeneration;
+static TaskHandle_t taskSignalGenerator;
+static TaskHandle_t taskSignalReceiver;
 static TaskHandle_t taskDataCompilation;
 static TaskHandle_t taskDataTransmission;
 static TaskHandle_t taskSocketListenConnect;
 
-void DataGenerationTask (void *pvParameters);
+void SignalReceiverTask (void *pvParameters);
+void SignalGeneratorTask (void *pvParameters);
 void DataCompilationTask (void *pvParameters);
 void DataTransmissionTask (void *pvParameters);
 
 void SocketListenConnectTask (void *pvParameters);
 
+static xQueueHandle gpio_evt_queue = NULL;
+
 uint32_t dataBuffers[2][BUFFER_SIZE];
 
 /* The event group allows multiple bits for each event, but we only care about one event
- * - are we connected to the AP with an IP? */
+ * - are we connected to the AP and do we have an IP? */
 const int WIFI_CONNECTED_BIT = BIT0;
 
 /* FreeRTOS event group to signal when we are connected*/
@@ -149,6 +168,60 @@ void wifi_setup()
 }
 
 
+static void IRAM_ATTR gpio_isr_handler(void* arg)
+{
+    uint32_t gpio_num = (uint32_t) arg;
+    xQueueSendFromISR(gpio_evt_queue, &gpio_num, NULL);
+}
+
+static void gpio_setup()
+{
+    printf (">> gpio_setup \n");
+    
+    gpio_config_t io_conf;
+    //disable interrupt
+    io_conf.intr_type = GPIO_PIN_INTR_DISABLE;
+    //set as output mode
+    io_conf.mode = GPIO_MODE_OUTPUT;
+    //bit mask of the pins that you want to set,e.g.GPIO18/19
+    io_conf.pin_bit_mask = GPIO_OUTPUT_PIN_SEL;
+    //disable pull-down mode
+    io_conf.pull_down_en = 0;
+    //disable pull-up mode
+    io_conf.pull_up_en = 0;
+    //configure GPIO with the given settings
+    gpio_config(&io_conf);
+    //interrupt of rising edge
+    io_conf.intr_type = GPIO_PIN_INTR_POSEDGE;
+    //bit mask of the pins, use GPIO4/5 here
+    io_conf.pin_bit_mask = GPIO_INPUT_PIN_SEL;
+    //set as input mode
+    io_conf.mode = GPIO_MODE_INPUT;
+    //enable pull-up mode
+    io_conf.pull_up_en = 1;
+    gpio_config(&io_conf);
+    //change gpio intrrupt type for one pin
+    gpio_set_intr_type(GPIO_INPUT_IO_0, GPIO_INTR_ANYEDGE);
+    //create a queue to handle gpio event from isr
+    gpio_evt_queue = xQueueCreate(10, sizeof(uint32_t));
+    //gpio task - now started with other tasks.
+    // xTaskCreate(signalGenerator, "gpio_task_example", 2048, NULL, 10, NULL);
+    //install gpio isr service
+    gpio_install_isr_service(ESP_INTR_FLAG_DEFAULT);
+    //hook isr handler for specific gpio pin
+    gpio_isr_handler_add(GPIO_INPUT_IO_0, gpio_isr_handler, (void*) GPIO_INPUT_IO_0);
+    
+    //hook isr handler for specific gpio pin
+    //gpio_isr_handler_add(GPIO_INPUT_IO_1, gpio_isr_handler, (void*) GPIO_INPUT_IO_1);
+    //remove isr handler for gpio number.
+    gpio_isr_handler_remove(GPIO_INPUT_IO_0);
+    //hook isr handler for specific gpio pin again
+    gpio_isr_handler_add(GPIO_INPUT_IO_0, gpio_isr_handler, (void*) GPIO_INPUT_IO_0);
+    
+    printf ("<< gpio_setup \n");
+}
+
+
 void app_main()
 {
     printf("Function Generator\n");
@@ -165,15 +238,28 @@ void app_main()
     
     wifi_setup();
     
+    gpio_setup();
+    {
+        
+    }
     
     // Now set up tasks to run independently.
-    xTaskCreatePinnedToCore (DataGenerationTask,
-                            "DataGenerationTask",  // A name just for humans
-                            2048,  // This stack size can be checked & adjusted by reading the Stack Highwater
-                            NULL,
-                            3, // Data Generation has highest priority.
-                            &taskDataGeneration,
-                            CORE1);
+    xTaskCreatePinnedToCore (SignalGeneratorTask,
+                             "SignalGeneratorTask",  // A name just for humans
+                             2048,  // This stack size can be checked & adjusted by reading the Stack Highwater
+                             NULL,
+                             10, // ISR has highest priority.
+                             &taskSignalGenerator,
+                             CORE0);
+    
+    // Now set up tasks to run independently.
+    xTaskCreatePinnedToCore (SignalReceiverTask,
+                             "SignalReceiverTask",  // A name just for humans
+                             2048,  // This stack size can be checked & adjusted by reading the Stack Highwater
+                             NULL,
+                             10, // ISR has highest priority.
+                             &taskSignalReceiver,
+                             CORE0);
     
     xTaskCreatePinnedToCore (DataCompilationTask,
                             "DataCompilationTask",
@@ -186,9 +272,9 @@ void app_main()
     // Data Transmission executes on Core 0
     xTaskCreatePinnedToCore (DataTransmissionTask,
                             "DataTransmissionTask",
-                            8192,
+                            16384,
                             NULL,
-                            3,  
+                            3,
                             &taskDataTransmission,
                             CORE0);
 
@@ -199,7 +285,7 @@ void app_main()
 /*--------------------------------------------------*/
 #define PAUSE_COUNT 1000
 
-void DataGenerationTask(void *pvParameters)
+void SignalGeneratorTask(void *pvParameters)
 {
     (void) pvParameters;
     
@@ -212,7 +298,8 @@ void DataGenerationTask(void *pvParameters)
     {
         dataValue++;
         pauseCt++;
-        xTaskNotify(taskDataCompilation, dataValue, eSetValueWithOverwrite);
+        gpio_set_level(GPIO_OUTPUT_IO_0, dataValue % 2);
+        gpio_set_level(GPIO_OUTPUT_IO_1, dataValue % 2);
         xTaskNotifyWait(0, 0, &inData, 10000);
         if (pauseCt == PAUSE_COUNT) // Need to relinquish CPU every now and then
         {
@@ -222,7 +309,32 @@ void DataGenerationTask(void *pvParameters)
     }
     
 }
-
+void SignalReceiverTask(void *pvParameters)
+{
+    (void) pvParameters;
+    
+    int32_t signalCt = 0;
+    uint32_t io_num;
+    int pauseCt = 0;
+    
+    vTaskDelay(1);  // Ensure all tassks are up and running before we commence
+    while(1)
+    {
+        pauseCt++;
+        if (xQueueReceive(gpio_evt_queue, &io_num, portMAX_DELAY))
+        {
+            signalCt++;
+            xTaskNotify(taskDataCompilation, signalCt, eSetValueWithOverwrite);
+            xTaskNotify(taskSignalGenerator, signalCt, eSetValueWithOverwrite);
+        }
+        if (pauseCt == PAUSE_COUNT) // Need to relinquish CPU every now and then
+        {
+            vTaskDelay(1);
+            pauseCt = 0;
+        }
+    }
+    
+}
 void DataCompilationTask(void *pvParameters)
 {
     (void) pvParameters;
@@ -252,7 +364,7 @@ void DataCompilationTask(void *pvParameters)
                 pauseCt = 0;
             }
         }
-        xTaskNotify(taskDataGeneration, inData, eSetValueWithOverwrite);
+        xTaskNotify(taskSignalReceiver, inData, eSetValueWithOverwrite);
     }
 }
 
@@ -267,7 +379,7 @@ void DataTransmissionTask(void *pvParameters)
     while(1)
     {
         xTaskNotifyWait(0, 0, &inData, 1000);
-        // printf("Received buffer: \n");
+        //printf("Received buffer: \n");
         if (wifiConnected && telnetClientConnected)
         {
             // printf("Sending data to client from buffer: %d. First number: %d \n", inData, buffers[inData][0]);
