@@ -13,3 +13,10 @@ To fully execute you will need to connect GPIO pin 18 to pin 04 and in 19 to pin
 
 Each signal rise and fall read causes a signal count to be incremented. 
 If a socket client has connected to the server, then each increment is stored in a buffer. When the buffer is full it is transmitted to the client. The data is transmitted in ACII85 encoding, (which transmits 5 ASCII bytes per 4 bytes of data, but ensures each byte is within the printable ASCII character range). The client will need to decode the data to retreive the actual numbers, which, of course, would be incremental assuming no data loss.
+
+  V0.2
+  ----
+  The thread to generate the data has been commented out. Instead the data is expected to be generated rom an external source. (For testing purposes I used a Raspberry pi)
+  
+  In tests this configuration could handle constant input signals upto 100MHz. Anything much above that would cause the FreeRTOS system to crash with the message that the ISR thread was not releasing control.
+  
