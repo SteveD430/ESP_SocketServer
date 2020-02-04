@@ -1,4 +1,4 @@
-/* Function Generator
+/* Function Generator Simulation
  
 */
 #include <stdio.h>
@@ -32,7 +32,7 @@
 
 #define CORE0 0
 #define CORE1 1
-#define BUFFER_SIZE 2000 // Size of double buffer for data compilation. This value will need to be calibrated.
+#define BUFFER_SIZE 5000 // Size of double buffer for data compilation. This value will need to be calibrated.
 #define ASCII_BUFFER_SIZE BUFFER_SIZE*5 // Buffer for Ascii85 data tx.
 
 /*
@@ -57,15 +57,15 @@ static int telnet_socket;
 static bool wifiConnected = false;
 static bool telnetClientConnected = false;
 
-static TaskHandle_t taskSignalGenerator;
+//static TaskHandle_t taskSignalGenerator;
 static TaskHandle_t taskSignalReceiver;
-static TaskHandle_t taskDataCompilation;
+// static TaskHandle_t taskDataCompilation;
 static TaskHandle_t taskDataTransmission;
 static TaskHandle_t taskSocketListenConnect;
 
 void SignalReceiverTask (void *pvParameters);
-void SignalGeneratorTask (void *pvParameters);
-void DataCompilationTask (void *pvParameters);
+// void SignalGeneratorTask (void *pvParameters);
+// void DataCompilationTask (void *pvParameters);
 void DataTransmissionTask (void *pvParameters);
 
 void SocketListenConnectTask (void *pvParameters);
@@ -212,7 +212,7 @@ static void gpio_setup()
     gpio_isr_handler_add(GPIO_INPUT_IO_0, gpio_isr_handler, (void*) GPIO_INPUT_IO_0);
     
     //hook isr handler for specific gpio pin
-    //gpio_isr_handler_add(GPIO_INPUT_IO_1, gpio_isr_handler, (void*) GPIO_INPUT_IO_1);
+    gpio_isr_handler_add(GPIO_INPUT_IO_1, gpio_isr_handler, (void*) GPIO_INPUT_IO_1);
     //remove isr handler for gpio number.
     gpio_isr_handler_remove(GPIO_INPUT_IO_0);
     //hook isr handler for specific gpio pin again
@@ -244,6 +244,7 @@ void app_main()
     }
     
     // Now set up tasks to run independently.
+    /*
     xTaskCreatePinnedToCore (SignalGeneratorTask,
                              "SignalGeneratorTask",  // A name just for humans
                              2048,  // This stack size can be checked & adjusted by reading the Stack Highwater
@@ -251,7 +252,7 @@ void app_main()
                              10, // ISR has highest priority.
                              &taskSignalGenerator,
                              CORE0);
-    
+    */
     // Now set up tasks to run independently.
     xTaskCreatePinnedToCore (SignalReceiverTask,
                              "SignalReceiverTask",  // A name just for humans
@@ -260,7 +261,7 @@ void app_main()
                              10, // ISR has highest priority.
                              &taskSignalReceiver,
                              CORE0);
-    
+    /*
     xTaskCreatePinnedToCore (DataCompilationTask,
                             "DataCompilationTask",
                             2048,
@@ -268,11 +269,11 @@ void app_main()
                             1,
                             &taskDataCompilation,
                             CORE1);
-    
+    */
     // Data Transmission executes on Core 0
     xTaskCreatePinnedToCore (DataTransmissionTask,
                             "DataTransmissionTask",
-                            16384,
+                            32768,
                             NULL,
                             3,
                             &taskDataTransmission,
@@ -284,16 +285,16 @@ void app_main()
 /*---------------------- Tasks ---------------------*/
 /*--------------------------------------------------*/
 #define PAUSE_COUNT 1000
-
+/*
 void SignalGeneratorTask(void *pvParameters)
 {
     (void) pvParameters;
     
     uint32_t dataValue = 0;
-    uint32_t inData;
+    uint32_t inData = 0;
     int pauseCt = 0;
     
-    vTaskDelay(1);  // Ensure all tassks are up and running before we commence
+    vTaskDelay(1);  // Ensure all tasks are up and running before we commence
     while(1)
     {
         dataValue++;
@@ -307,25 +308,44 @@ void SignalGeneratorTask(void *pvParameters)
             pauseCt = 0;
         }
     }
-    
 }
+ */
+
 void SignalReceiverTask(void *pvParameters)
 {
     (void) pvParameters;
     
     int32_t signalCt = 0;
     uint32_t io_num;
+    // uint32_t inData = 0;
+    
+    int buff = 0;
+    int prevBuff = 1;
+    int count = 0;
+    
     int pauseCt = 0;
     
-    vTaskDelay(1);  // Ensure all tassks are up and running before we commence
+    vTaskDelay(1);  // Ensure all tasks are up and running before we commence
     while(1)
     {
         pauseCt++;
-        if (xQueueReceive(gpio_evt_queue, &io_num, portMAX_DELAY))
+        // if (xQueueReceive(gpio_evt_queue, &io_num, portMAX_DELAY))
+        if (xQueueReceive(gpio_evt_queue, &io_num, 5))
         {
-            signalCt++;
-            xTaskNotify(taskDataCompilation, signalCt, eSetValueWithOverwrite);
-            xTaskNotify(taskSignalGenerator, signalCt, eSetValueWithOverwrite);
+            buffers[buff][count++] = signalCt++;
+            
+            if (count >= BUFFER_SIZE)
+            {
+                count = 0;
+                prevBuff = buff;
+                buff = 1 - buff;
+                xTaskNotify(taskDataTransmission, prevBuff, eSetValueWithOverwrite);
+            }
+            //xTaskNotify(taskSignalGenerator, inData, eSetValueWithOverwrite);
+        }
+        else
+        {
+            printf("No data received\n");
         }
         if (pauseCt == PAUSE_COUNT) // Need to relinquish CPU every now and then
         {
@@ -335,6 +355,7 @@ void SignalReceiverTask(void *pvParameters)
     }
     
 }
+/*
 void DataCompilationTask(void *pvParameters)
 {
     (void) pvParameters;
@@ -345,7 +366,7 @@ void DataCompilationTask(void *pvParameters)
     int count = 0;
     uint32_t inData;
     
-    vTaskDelay(1); // Ensure all tassks are up and running before we commence
+    vTaskDelay(1); // Ensure all tasks are up and running before we commence
     while(1)
     {
         xTaskNotifyWait(0, 0, &inData, 1000);
@@ -358,16 +379,17 @@ void DataCompilationTask(void *pvParameters)
             prevBuff = buff;
             buff = 1 - buff;
             xTaskNotify(taskDataTransmission, prevBuff, eSetValueWithOverwrite);
-            if (pauseCt == PAUSE_COUNT) // Need to relinquish CPU every now and then
-            {
-                vTaskDelay(1);
-                pauseCt = 0;
-            }
+ 
+            // if (pauseCt == PAUSE_COUNT * 2) // Need to relinquish CPU every now and then
+            // {
+                // vTaskDelay(1);
+                // pauseCt = 0;
+            // }
         }
         xTaskNotify(taskSignalReceiver, inData, eSetValueWithOverwrite);
     }
 }
-
+*/
 void DataTransmissionTask(void *pvParameters)
 {
     uint32_t inData;
@@ -378,7 +400,7 @@ void DataTransmissionTask(void *pvParameters)
     
     while(1)
     {
-        xTaskNotifyWait(0, 0, &inData, 1000);
+        xTaskNotifyWait(0, 0, &inData, 10000);
         //printf("Received buffer: \n");
         if (wifiConnected && telnetClientConnected)
         {
